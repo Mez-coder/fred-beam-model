@@ -1,0 +1,13 @@
+region<
+  ID=RS
+ L=[40, 40, 1]
+  O=[0, 0, 0]
+  f=[0, 1, 0]
+  material=HU -1000
+  pivot=[0.5, 0.5, 1]
+  u=[0, 0, 1]
+  voxels=[1, 1, 1]
+region>
+
+group: rangeShifterGroup RS
+group: nozzleGroup rangeShifterGroup

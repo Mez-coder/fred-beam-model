@@ -1,0 +1,32 @@
+### Phantom ###
+region<
+    ID=phantom
+    CTscan= 'CT.mhd'
+    score = [dose]
+    lWriteLETd_parts = false
+    lWriteCTHU = true
+  
+region>
+
+### Materials ###
+include: materials.inp
+
+### Regions ###
+include: regions.inp
+
+### Beam ###
+include: rtplan.inp
+nprim = 1E4
+
+### Physics ###
+IonizPotential=78
+
+### Control ###
+lAllowHUClamping = true # allow clamping HU values to the HU calibration range
+lTracking_nuc_el = true  #enable nuclear elastic interactions
+lTracking_nuc_inel = true #enable nuclear inelastic interactions
+lTracking_nuc = true # enable all nuclear interactions
+lTracking_fluc = true # energy straggling
+lUseInternalHU2Mat = true
+WaterIpot = 78
+

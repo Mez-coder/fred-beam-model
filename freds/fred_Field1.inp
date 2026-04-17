@@ -1,0 +1,31 @@
+### Phantom ###
+region<
+    ID=phantom
+    CTscan= 'CT.mhd'
+    score = [dose, dose-to-water]
+    lWriteLETd_parts = false
+    lWriteCTHU = true
+  
+region>
+
+### Materials ###
+include: materials.inp
+
+### Regions ###
+include: regions/region_Field1.inp
+
+### Beam ###
+include: rtplans/rtplan_Field1.inp
+nprim = 5E+04
+
+### Physics ###
+IonizPotential=78
+
+### Control ###
+lAllowHUClamping = true
+lTracking_nuc_el = true
+lTracking_nuc_inel = true
+lTracking_nuc = true
+lTracking_fluc = true
+lUseInternalHU2Mat = true
+WaterIpot = 78
