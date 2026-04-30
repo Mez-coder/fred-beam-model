@@ -9,7 +9,7 @@ Usage:
     python get_plan_monospot.py <beam_model_file> --energy <proton_energy_MeV> --gantry_angle <gantry_angle_deg>
 
 Example:
-    python get_plan_sinlge_spot.py CustomBeamModel.bm --energy 150.0 --gantry_angle 90.0
+    python get_plan_monospot.py CustomBeamModel.bm --energy 150.0 --gantry_angle 90.0
 
 Author: Generated for proton therapy workflow
 """
@@ -586,7 +586,7 @@ def main():
         sys.exit(1)
 
     try:
-        clear_directories("rtplans", "freds", "regions")
+        # clear_directories("rtplans", "freds", "regions")
 
         rtplan_file, rs_ids = generate_inp_file_single_spot(
             bm_file=args.bm_file,
