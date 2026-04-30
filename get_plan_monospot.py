@@ -328,8 +328,10 @@ def generate_setup_delivery_sequence(fields_info, isocenter_mm):
     
     return lines, rs_ids
 
-def generate_pb_single_spot(energy, bm_energy_df, field_id=1, n_primaries=1):
-    """Generate pencil beam definition lines for a single centred spot."""
+def generate_pb_single_spot(energy, bm_energy_df, field_id=1, n_primaries=1,
+                            alpha_x=None, beta_x=None, alpha_y=None, beta_y=None):
+    """Generate pencil beam definition lines for a single centred spot.
+    If new alpha and beta parameters are provided, they are used instead of the ones in the custom beam model."""
     lines = []
     lines.append("#" * 36)
     lines.append("###### Start of PB definition ######")
@@ -344,17 +346,17 @@ def generate_pb_single_spot(energy, bm_energy_df, field_id=1, n_primaries=1):
 
     # Interpolate beam model parameters
     bm_params = interpolate_beam_params(bm_energy_df, energy)
+    alpha_x = alpha_x if alpha_x is not None else bm_params['alphaX']
+    beta_x  = beta_x  if beta_x  is not None else bm_params['betaX']
+    alpha_y = alpha_y if alpha_y is not None else bm_params['alphaY']
+    beta_y  = beta_y  if beta_y  is not None else bm_params['betaY']
 
     # Single spot at field centre, reference plane
     px, py, pz = 0.0, 0.0, 0.0  # cm, at the reference plane (origin)
     vx, vy, vz = 0.0, 0.0, 1.0  # direction along beam axis
 
     estdev = bm_params['dEnergy']
-    alpha_x = bm_params['alphaX']
-    beta_x = bm_params['betaX']
     epsilon_x = bm_params['epsilonX']
-    alpha_y = bm_params['alphaY']
-    beta_y = bm_params['betaY']
     epsilon_y = bm_params['epsilonY']
 
     line = (
@@ -372,6 +374,7 @@ def generate_pb_single_spot(energy, bm_energy_df, field_id=1, n_primaries=1):
 
 def generate_inp_file_single_spot(bm_file, energy, gantry_angle=0.0, couch_angle=0.0, snout_pos_mm=200.0,
                                   isocenter=None, n_primaries=1, rs_id=None, rs_setting=None,
+                                  alpha_x=None, beta_x=None, alpha_y=None, beta_y=None,
                                   output_dir="rtplans"):
     """
     Generate FRED .inp file(s) from a single centred spot at a given energy and using beam model files.
@@ -392,7 +395,8 @@ def generate_inp_file_single_spot(bm_file, energy, gantry_angle=0.0, couch_angle
     output_path.mkdir(parents=True, exist_ok=True)
 
     field_id = int(fields_info.iloc[0]['FDeliveryNo'])
-    pb_lines, total_primaries = generate_pb_single_spot(energy, bm_energy_df, field_id, n_primaries)
+    pb_lines, total_primaries = generate_pb_single_spot(energy, bm_energy_df, field_id, n_primaries,
+                                                        alpha_x, beta_x, alpha_y, beta_y)
 
     print(f"Generating .inp file for single spot at {energy:.3f} MeV...")
 
@@ -574,6 +578,14 @@ def main():
                         help='Number of primary particles for FRED (default: 5e4)')
     parser.add_argument('--n-weight',     type=float, default=1.0,
                         help='Spot weight / N value written to the pb line (default: 1.0)')
+    parser.add_argument('--alpha-x',      type=float, default=None,
+                        help="Twiss alphaX parameter (default: read from beam model)")
+    parser.add_argument('--beta-x',      type=float, default=None,
+                        help="Twiss betaX parameter (default: read from beam model)")
+    parser.add_argument('--alpha-y',      type=float, default=None,
+                        help="Twiss alphaY parameter (default: read from beam model)")
+    parser.add_argument('--beta-y',      type=float, default=None,
+                        help="Twiss betaY parameter (default: read from beam model)")
 
     args = parser.parse_args()
 
@@ -596,6 +608,10 @@ def main():
             snout_pos_mm=args.snout_pos,
             isocenter=args.isocenter,
             n_primaries=args.n_weight,
+            alpha_x=args.alpha_x,
+            beta_x=args.beta_x,
+            alpha_y=args.alpha_y,
+            beta_y=args.beta_y,
             output_dir="rtplans",
         )
 
