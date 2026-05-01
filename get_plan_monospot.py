@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Generate FRED simulation input file (.inp) from DICOM RN treatment plan.
+Generate FRED simulation input file (.inp) for a single spot at a determined energy and gantry angle.
 
-This script reads a DICOM RN (Radiotherapy Plan) file and a beam model file,
+This script reads a CT mhd file and a beam model file,
 then generates a formatted .inp file for FRED Monte Carlo simulation.
 
 Usage:
-    python get_plan.py <dicom_folder> <beam_model_file> [output_file]
+    python get_plan_monospot.py <beam_model_file> --energy <proton_energy_MeV> --gantry_angle <gantry_angle_deg>
 
 Example:
-    python get_plan.py dicom_folder CustomBeamModel.bm plan.inp
+    python get_plan_monospot.py CustomBeamModel.bm --energy 150.0 --gantry_angle 90.0
 
 Author: Generated for proton therapy workflow
 """
@@ -21,7 +21,6 @@ import pandas as pd
 from datetime import datetime
 from pathlib import Path
 
-import pydicom
 import fredtools as ft
 import re
 
@@ -48,97 +47,6 @@ EMITTANCE_REF_PLANE_DISTANCE_CM = (SMY_TO_ISO_DISTANCE_MM / 10 - NOZZLE_TO_ISO_D
 # =============================================================================
 # Helper Functions
 # =============================================================================
-
-def get_table_top_positions(rn_file):
-    """
-    Extract table top positions from DICOM RN file using pydicom.
-    
-    The table top positions are stored in IonBeamSequence[n].IonControlPointSequence[0].
-    We take the values from the first beam's first control point (they should be the same
-    for all beams in a typical plan).
-    
-    Parameters
-    ----------
-    rn_file : str
-        Path to DICOM RN file
-    
-    Returns
-    -------
-    dict
-        Dictionary with keys:
-        - 'vertical': TableTopVerticalPosition (mm)
-        - 'longitudinal': TableTopLongitudinalPosition (mm)
-        - 'lateral': TableTopLateralPosition (mm)
-        Returns None values if not found.
-    """
-    ds = pydicom.dcmread(rn_file)
-    
-    positions = {
-        'vertical': None,
-        'longitudinal': None,
-        'lateral': None
-    }
-    
-    try:
-        if "IonBeamSequence" in ds and len(ds.IonBeamSequence) > 0:
-            beam = ds.IonBeamSequence[0]
-            if "IonControlPointSequence" in beam and len(beam.IonControlPointSequence) > 0:
-                cp = beam.IonControlPointSequence[0]
-                
-                if "TableTopVerticalPosition" in cp:
-                    positions['vertical'] = float(cp.TableTopVerticalPosition)
-                if "TableTopLongitudinalPosition" in cp:
-                    positions['longitudinal'] = float(cp.TableTopLongitudinalPosition)
-                if "TableTopLateralPosition" in cp:
-                    positions['lateral'] = float(cp.TableTopLateralPosition)
-    except Exception as e:
-        print(f"Warning: Could not extract table top positions: {e}")
-    
-    return positions
-
-
-def calculate_adjusted_isocenter(isocenter_mm, table_positions):
-    """
-    Calculate the adjusted isocenter by adding table top positions.
-    
-    The DICOM isocenter and table top positions are combined to get the 
-    final phantom position for FRED.
-    
-    Coordinate mapping (DICOM to FRED):
-    - DICOM X (Lateral) -> FRED X
-    - DICOM Y (Longitudinal) -> FRED Y  
-    - DICOM Z (Vertical) -> FRED Z
-    
-    Parameters
-    ----------
-    isocenter_mm : list
-        Isocenter position [X, Y, Z] in mm from DICOM
-    table_positions : dict
-        Table top positions from get_table_top_positions()
-    
-    Returns
-    -------
-    list
-        Adjusted isocenter [X, Y, Z] in mm
-    """
-    # Start with isocenter
-    adjusted = list(isocenter_mm)
-    
-    # Add table top positions
-    # TableTopLateralPosition -> X
-    if table_positions['lateral'] is not None:
-        adjusted[0] += table_positions['lateral']
-    
-    # TableTopLongitudinalPosition -> Y
-    if table_positions['longitudinal'] is not None:
-        adjusted[1] += table_positions['longitudinal']
-    
-    # TableTopVerticalPosition -> Z
-    if table_positions['vertical'] is not None:
-        adjusted[2] += table_positions['vertical']
-    
-    return adjusted
-
 
 def interpolate_beam_params(bm_energy_df, energy):
     """
@@ -212,7 +120,6 @@ def format_scientific(value, precision=10):
     """Format a float in scientific notation."""
     return f"{value:+.{precision}E}"
 
-import shutil
 
 def clear_directories(*dirs):
     """Clear all files in directories without removing the directories themselves."""
@@ -225,11 +132,40 @@ def clear_directories(*dirs):
         else:
             path.mkdir(parents=True)
 
+def extract_rs_value(rs_id):
+    """
+    Extract the numeric value from a range shifter ID.
+
+    e.g., "RS=2cm" -> 2
+    """
+    if rs_id is None or pd.isna(rs_id):
+        return None
+
+    match = re.search(r'\d+', str(rs_id))
+    return int(match.group()) if match else None
+
 # =============================================================================
 # Main INP Generation Functions
 # =============================================================================
 
-def generate_header(beam_model, fields_info, spots_df, total_primaries_per_field):
+def build_single_field_info(gantry_angle=0.0, couch_angle=0.0, snout_pos_mm=200.0, rs_id=None, rs_setting=None):
+    """Build a one-row fields_info DataFrame for a single synthetic field."""
+    data = {
+        'FDeliveryNo': [1],
+        'FNo': [1],
+        'FName': ['SingleSpot'],
+        'FGantryAngle': [gantry_angle],
+        'FCouchAngle': [couch_angle],
+        'FCouchPitchAngle': [0.0],
+        'FCouchRollAngle': [0.0],
+        'FIsoPos': [None],
+        'PBSnoutPos': [snout_pos_mm],
+        'PBRSID': [rs_id],
+        'PBRSSetting': [rs_setting],
+    }
+    return pd.DataFrame(data)
+
+def generate_header(beam_model, num_spots, total_primaries):
     """Generate the .inp file header section."""
     lines = []
     
@@ -237,26 +173,18 @@ def generate_header(beam_model, fields_info, spots_df, total_primaries_per_field
     bm_desc = beam_model.get('BM Description', {})
     bm_name = bm_desc.get('name', 'Unknown')
     bm_time = bm_desc.get('creationTime', datetime.now().strftime('%Y/%m/%d %H:%M:%S'))
-    
-    # Count fields and spots
-    num_fields = len(fields_info)
-    spots_per_field = [len(spots_df[spots_df['FDeliveryNo'] == fid]) for fid in fields_info['FDeliveryNo']]
-    total_spots = sum(spots_per_field)
-    total_primaries = sum(total_primaries_per_field)
-    
+
     # Format header
     lines.append("#" * 143)
     lines.append(f"# Beam model: {bm_name} ({bm_time})")
-    lines.append(f"# Fields no.: {num_fields}")
-    lines.append(f"# Fields PB no.: {spots_per_field} (total: {total_spots})")
+    lines.append(f"# Fields no.: 1")
+    lines.append(f"# Fields PB no.: {num_spots} (total: {num_spots})")
     
     # Format primaries
-    prim_list = [f"{p:.2f}" for p in total_primaries_per_field]
-    lines.append(f"# Fields prim. no.: [{', '.join(prim_list)}] (total: {total_primaries:.2f} ~= {total_primaries:.3E})")
+    lines.append(f"# Fields prim. no.: [{total_primaries:.2f}] (total: {total_primaries:.3E})")
     lines.append("#" * 143)
     
     return lines
-
 
 def generate_field_definitions(fields_info):
     """Generate field definition lines."""
@@ -329,17 +257,7 @@ def clean_rs_id(rs_id):
     cleaned = "RS"
     return cleaned
 
-def extract_rs_value(rs_id):
-    """
-    Extract the numeric value from a range shifter ID.
-    
-    e.g., "RS=2cm" -> 2
-    """
-    if rs_id is None or pd.isna(rs_id):
-        return None
-    
-    match = re.search(r'\d+', str(rs_id))
-    return int(match.group()) if match else None
+
 
 def generate_setup_delivery_sequence(fields_info, isocenter_mm):
     """Generate setup and delivery sequence for all fields."""
@@ -410,212 +328,102 @@ def generate_setup_delivery_sequence(fields_info, isocenter_mm):
     
     return lines, rs_ids
 
-
-
-def generate_pb_definitions(spots_df, field_name_required, bm_energy_df, rn_plan):
-    """Generate pencil beam definition lines."""
+def generate_pb_single_spot(energy, bm_energy_df, field_id=1, n_primaries=1,
+                            alpha_x=None, beta_x=None, alpha_y=None, beta_y=None):
+    """Generate pencil beam definition lines for a single centred spot.
+    If new alpha and beta parameters are provided, they are used instead of the ones in the custom beam model."""
     lines = []
-    primaries_per_field = {}  # Track N totals by field_id
     lines.append("#" * 36)
     lines.append("###### Start of PB definition ######")
     lines.append("#" * 36)
-    
-    # Group spots by field
-    fields = spots_df['FDeliveryNo'].unique()
-    
-    spot_counter = 0
-    
-    for field_id in sorted(fields):
-        
-        
-        field_spots = spots_df[spots_df['FDeliveryNo'] == field_id].copy()
-        field_name = field_spots.iloc[0]['FName']
+    lines.append(f"###### PB definitions for field {field_id}")
+    lines.append(
+        "# spotID    fieldID           P.x           P.y           P.z"
+        "             v.x           v.y           v.z        Emean     Estdev"
+        "           N               twissAlphaX       twissBetaX        emittanceX"
+        "          twissAlphaY       twissBetaY        emittanceY"
+    )
 
-        if field_name != field_name_required:
-            continue
-        
-        # Filter out spots with zero meterset weight
-        field_spots = field_spots[field_spots['PBMsW'] > 0]
-        
-        if len(field_spots) == 0:
-            continue
-        
-        primaries_per_field[field_id] = 0.0
-        
-        
+    # Interpolate beam model parameters
+    bm_params = interpolate_beam_params(bm_energy_df, energy)
+    alpha_x = alpha_x if alpha_x is not None else bm_params['alphaX']
+    beta_x  = beta_x  if beta_x  is not None else bm_params['betaX']
+    alpha_y = alpha_y if alpha_y is not None else bm_params['alphaY']
+    beta_y  = beta_y  if beta_y  is not None else bm_params['betaY']
 
+    # Single spot at field centre, reference plane
+    px, py, pz = 0.0, 0.0, 0.0  # cm, at the reference plane (origin)
+    vx, vy, vz = 0.0, 0.0, 1.0  # direction along beam axis
 
-        # Get BeamMeterset for this field from FractionGroupSequence
-        beam_meterset = None
-        for rbs in rn_plan.FractionGroupSequence[0].ReferencedBeamSequence:
-            if rbs.ReferencedBeamNumber == field_id:
-                beam_meterset = float(rbs.BeamMeterset)
-                break
-        
-        # Get FinalCumulativeMetersetWeight from IonBeamSequence
-        final_cumulative_meterset_weight = None
-        for beam in rn_plan.IonBeamSequence:
-            if beam.BeamNumber == field_id:
-                final_cumulative_meterset_weight = float(beam.FinalCumulativeMetersetWeight)
-                break
-        
-        if beam_meterset is None or final_cumulative_meterset_weight is None:
-            print(f"Warning: Could not find meterset info for field {field_id}")
-            continue
+    estdev = bm_params['dEnergy']
+    epsilon_x = bm_params['epsilonX']
+    epsilon_y = bm_params['epsilonY']
+
+    line = (
+        f"pb: {1:<10d} {int(field_id):<4d} \t"
+        f"{format_scientific(px)} {format_scientific(py)} {format_scientific(pz)}   "
+        f"{format_scientific(vx)} {format_scientific(vy)} {format_scientific(vz)}   "
+        f"{energy:7.3f} {estdev:.5E}   {n_primaries:.10E}   "
+        f"{format_scientific(alpha_x)} {format_scientific(beta_x)} {format_scientific(epsilon_x)}   "
+        f"{format_scientific(alpha_y)} {format_scientific(beta_y)} {format_scientific(epsilon_y)}"
+    )
+    lines.append(line)
+
+    return lines, n_primaries
 
 
-        
-        lines.append(f"###### PB definitions for field {field_id}")
-        lines.append("# spotID    fieldID           P.x           P.y           P.z             v.x           v.y           v.z        Emean     Estdev           N               twissAlphaX       twissBetaX        emittanceX          twissAlphaY       twissBetaY        emittanceY")
-        
-        for _, spot in field_spots.iterrows():
-            spot_counter += 1
-            
-            # Get spot position (convert mm to cm)
-            # DICOM PBPosX/PBPosY are in the plane perpendicular to beam
-            # These map to P.x and P.y in FRED, P.z = 0 at reference plane
-            px = -spot['PBPosX'] / 10.0  # mm to cm                           -------lmfao wtf?
-            py = +spot['PBPosY'] / 10.0  # mm to cm
-            pz = 0.0  # At the reference plane
-            
-            # Direction vector (simplified - pointing along beam)
-            vx, vy, vz = 0.0, 0.0, 1.0
-            
-            # Energy
-            energy = spot['PBnomEnergy']
-            
-            # Interpolate beam model parameters for this energy
-            try:
-                bm_params = interpolate_beam_params(bm_energy_df, energy)
-            except ValueError as e:
-                print(f"Warning: {e}. Skipping spot.")
-                continue
-            
-            # Energy spread from beam model
-            estdev = bm_params['dEnergy']
-            
-            # Calculate N (number of primaries)
-            # N = scan_spot_meterset_weight * scaling_factor * (beam_meterset / final_cumulative_meterset_weight)
-            msw = spot['PBMsW']
-            scaling_factor = bm_params['scalingFactor']
-            N = msw * scaling_factor * (beam_meterset / final_cumulative_meterset_weight)
-            primaries_per_field[field_id] += N
-            # Twiss parameters from beam model
-            alpha_x = bm_params['alphaX']
-            beta_x = bm_params['betaX']
-            epsilon_x = bm_params['epsilonX']
-            alpha_y = bm_params['alphaY']
-            beta_y = bm_params['betaY']
-            epsilon_y = bm_params['epsilonY']
-
-            
-            
-            
-            # Format the line
-            line = (f"pb: {spot_counter:<10d} {int(field_id):<4d} \t"
-                    f"{format_scientific(px)} {format_scientific(py)} {format_scientific(pz)}   "
-                    f"{format_scientific(vx)} {format_scientific(vy)} {format_scientific(vz)}   "
-                    f"{energy:7.3f} {estdev:.5E}   {N:.10E}   "
-                    f"{format_scientific(alpha_x)} {format_scientific(beta_x)} {format_scientific(epsilon_x)}   "
-                    f"{format_scientific(alpha_y)} {format_scientific(beta_y)} {format_scientific(epsilon_y)}")
-            
-            lines.append(line)
-    
-    # Convert to sorted list for header
-    sorted_field_ids = sorted(primaries_per_field.keys())
-    primaries_list = [primaries_per_field[fid] for fid in sorted_field_ids]
-    
-    return lines, primaries_list
-
-
-
-def extract_field_info(spots_df):
-    """Extract unique field information from spots DataFrame."""
-    # Get unique fields based on FDeliveryNo
-    fields_info = spots_df.groupby('FDeliveryNo').first().reset_index()
-    
-    # Keep only relevant columns
-    cols_to_keep = ['FDeliveryNo', 'FNo', 'FName', 'FGantryAngle', 'FCouchAngle', 
-                    'FCouchPitchAngle', 'FCouchRollAngle', 'FIsoPos', 'PBSnoutPos',
-                    'PBRSID', 'PBRSSetting']
-    
-    # Filter to columns that exist
-    cols_to_keep = [c for c in cols_to_keep if c in fields_info.columns]
-    fields_info = fields_info[cols_to_keep]
-    
-    return fields_info
-
-def generate_inp_file(rn_file, bm_file, output_dir="rtplans"):
+def generate_inp_file_single_spot(bm_file, energy, gantry_angle=0.0, couch_angle=0.0, snout_pos_mm=200.0,
+                                  isocenter=None, n_primaries=1, rs_id=None, rs_setting=None,
+                                  alpha_x=None, beta_x=None, alpha_y=None, beta_y=None,
+                                  output_dir="rtplans"):
     """
-    Generate FRED .inp file(s) from DICOM RN and beam model files.
-    Returns a list of output filenames (one per field).
+    Generate FRED .inp file(s) from a single centred spot at a given energy and using beam model files.
+    Returns output filename and rs_ids.
     """
+    if isocenter is None:
+        isocenter = [0.0, 0.0, 0.0]
+
     print(f"Reading beam model: {bm_file}")
     beam_model = ft.readBeamModel(bm_file)
     bm_energy_df = beam_model['BM Energy']
 
-    print(f"Reading RN DICOM: {rn_file}")
-
-    rn_info = ft.getRNInfo(rn_file)
-    spots_df = ft.getRNSpots(rn_file)
-    isocenter = ft.getRNIsocenter(rn_file)
-
-    table_positions = get_table_top_positions(rn_file)
-    print(f"  Table top positions (mm) - for reference only:")
-    print(f"    Vertical: {table_positions['vertical']}")
-    print(f"    Longitudinal: {table_positions['longitudinal']}")
-    print(f"    Lateral: {table_positions['lateral']}")
-    print(f"  Isocenter (mm): {isocenter}")
-
-    fields_info = extract_field_info(spots_df)
+    fields_info = build_single_field_info(gantry_angle, couch_angle, snout_pos_mm, rs_id, rs_setting)
     print(fields_info)
-
-    print(f"  Plan: {rn_info.get('planLabel', 'Unknown')}")
-    print(f"  Patient: {rn_info.get('patientName', 'Unknown')}")
-    print(f"  Fields: {len(fields_info)}")
-    print(f"  Total spots: {len(spots_df)}")
-    print(f"  Non-zero spots: {len(spots_df[spots_df['PBMsW'] > 0])}")
 
     # Ensure output directory exists
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    output_files = []
+    field_id = int(fields_info.iloc[0]['FDeliveryNo'])
+    pb_lines, total_primaries = generate_pb_single_spot(energy, bm_energy_df, field_id, n_primaries,
+                                                        alpha_x, beta_x, alpha_y, beta_y)
 
-    for iter, field in fields_info.iterrows():
-        field_name = field.get("FName")
+    print(f"Generating .inp file for single spot at {energy:.3f} MeV...")
 
-        rn_plan = pydicom.dcmread(rn_file)
-        pb_lines, primaries_per_field = generate_pb_definitions(
-            spots_df, field_name, bm_energy_df, rn_plan
-        )
+    all_lines = []
+    all_lines.extend(generate_header(beam_model, num_spots=1, total_primaries=total_primaries))
+    all_lines.extend(generate_field_definitions(fields_info))
+    all_lines.extend(generate_pbmaster_definitions(fields_info))
+    all_lines.extend(generate_group_region_definitions(fields_info))
+    lines, rs_ids = generate_setup_delivery_sequence(fields_info, isocenter)
+    all_lines.extend(lines)
+    all_lines.extend(pb_lines)
 
-        print(f"Generating .inp file sections for field '{field_name}'...")
-        all_lines = []
-        all_lines.extend(generate_header(beam_model, fields_info, spots_df, primaries_per_field))
-        all_lines.extend(generate_field_definitions(fields_info))
-        all_lines.extend(generate_pbmaster_definitions(fields_info))
-        all_lines.extend(generate_group_region_definitions(fields_info))
-        lines, rs_ids = generate_setup_delivery_sequence(fields_info, isocenter)
-        all_lines.extend(lines)
-        all_lines.extend(pb_lines)
+    output_file = f"rtplan_SingleSpot_{energy:.1f}MeV.inp"
+    full_path = output_path / output_file
 
-        output_file = f"rtplan_{field_name.replace(" ", "")}.inp"
-        full_path = output_path / output_file
+    print(f"Writing to: {full_path}")
+    with open(full_path, 'w') as f:
+        f.write('\n'.join(all_lines))
 
-        print(f"Writing to: {full_path}")
-        with open(full_path, 'w') as f:
-            f.write('\n'.join(all_lines))
+    print(f"  Done: {output_file}")
 
-        print(f"  Done: {output_file}")
-        output_files.append(output_file)
-
-    return output_files, rs_ids
+    return output_file, rs_ids
 
 
 def generate_fred_inp(rtplan_inp_filename, regions_filename, output_dir='freds', ct_file='CT.mhd',
                       nprim=1e4, ionization_potential=78.0,
-                      materials_file='materials.inp', regions_file='regions.inp', rtplan_dir = "rtplans", regions_dir = "regions"):
+                      materials_file='materials.inp', rtplan_dir = "rtplans", regions_dir = "regions"):
     """
     Generate FRED main simulation input file for a single rtplan .inp.
     rtplan_inp_filename is just the filename (e.g. 'rtplan_Field1.inp'),
@@ -631,7 +439,6 @@ def generate_fred_inp(rtplan_inp_filename, regions_filename, output_dir='freds',
     lines.append("    ID=phantom")
     lines.append(f"    CTscan= '{ct_file}'")
     lines.append("    score = [dose, dose-to-water]")
-    #lines.append("    scoreij = [dose]")
     lines.append("    lWriteLETd_parts = false")
     lines.append("    lWriteCTHU = true")
     lines.append("  ")
@@ -746,66 +553,83 @@ def generate_region_inp(rtplan_inp_filename, output_dir='regions', rs_length=Non
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Generate FRED .inp file from DICOM RN treatment plan',
+        description='Generate FRED .inp file for a single pencil beam spot',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
     Examples:
-    python get_plan.py dicom_folder CustomBeamModel.bm
+    python get_plan_monospot.py CustomBeamModel.bm --energy 150.0 --gantry-angle 90
         """
     )
 
-    parser.add_argument('dcm_file', help='Path to DICOM folder')
     parser.add_argument('bm_file', help='Path to beam model (.bm) file')
     parser.add_argument('ct_file', help='Path to CT (.mhd) file')
+    parser.add_argument('--energy',       type=float, required=True,
+                        help='Nominal beam energy in MeV')
+    parser.add_argument('--gantry-angle', type=float, default=0.0,
+                        help='Gantry angle in degrees (default: 0)')
+    parser.add_argument('--couch-angle',  type=float, default=0.0,
+                        help='Couch angle in degrees (default: 0)')
+    parser.add_argument('--snout-pos',    type=float, default=200.0,
+                        help='Snout position in mm (default: 200)')
+    parser.add_argument('--isocenter',    type=float, nargs=3,
+                        default=[0.0, 0.0, 0.0], metavar=('X', 'Y', 'Z'),
+                        help='Isocenter position in mm (default: 0 0 0)')
+    parser.add_argument('--nprim',        type=float, default=5e4,
+                        help='Number of primary particles for FRED (default: 5e4)')
+    parser.add_argument('--n-weight',     type=float, default=1.0,
+                        help='Spot weight / N value written to the pb line (default: 1.0)')
+    parser.add_argument('--alpha-x',      type=float, default=None,
+                        help="Twiss alphaX parameter (default: read from beam model)")
+    parser.add_argument('--beta-x',      type=float, default=None,
+                        help="Twiss betaX parameter (default: read from beam model)")
+    parser.add_argument('--alpha-y',      type=float, default=None,
+                        help="Twiss alphaY parameter (default: read from beam model)")
+    parser.add_argument('--beta-y',      type=float, default=None,
+                        help="Twiss betaY parameter (default: read from beam model)")
 
     args = parser.parse_args()
-    dcm_folder = args.dcm_file
-    dcm_file_dict = ft.sortDicoms(dcm_folder, recursive=False, displayInfo=True)
-
-    rn_file = dcm_file_dict['RNfileNames']
-
-    if not Path(rn_file).exists():
-        print(f"Error: RN file not found in: {args.dcm_file}")
-        sys.exit(1)
 
     if not Path(args.bm_file).exists():
         print(f"Error: Beam model file not found: {args.bm_file}")
         sys.exit(1)
 
-    if not Path(args.ct_file):
+    if not Path(args.ct_file).exists():
         print(f"Error: CT file not found: {args.ct_file}")
         sys.exit(1)
 
     try:
-        clear_directories("rtplans", "freds", "regions")
-        # Generate one rtplan .inp per field
-        rtplan_files, rs_ids = generate_inp_file(rn_file, args.bm_file, output_dir="rtplans")
+        # clear_directories("rtplans", "freds", "regions")
 
-        # Generate one fred .inp per rtplan
-        fred_files = []
-        region_files = []
-        a=0
-        for rtplan_file in rtplan_files:
-            rs_length = extract_rs_value(rs_ids[a])
+        rtplan_file, rs_ids = generate_inp_file_single_spot(
+            bm_file=args.bm_file,
+            energy=args.energy,
+            gantry_angle=args.gantry_angle,
+            couch_angle=args.couch_angle,
+            snout_pos_mm=args.snout_pos,
+            isocenter=args.isocenter,
+            n_primaries=args.n_weight,
+            alpha_x=args.alpha_x,
+            beta_x=args.beta_x,
+            alpha_y=args.alpha_y,
+            beta_y=args.beta_y,
+            output_dir="rtplans",
+        )
 
-            region_file = generate_region_inp(rtplan_file, output_dir="regions", rs_length=rs_length)
-            fred_file = generate_fred_inp(rtplan_file, region_file, output_dir="freds", nprim=5e4, ct_file=args.ct_file)
-            
+        rs_length = extract_rs_value(rs_ids[0])
+        region_file = generate_region_inp(rtplan_file, output_dir="regions",
+                                          rs_length=rs_length)
+        fred_file = generate_fred_inp(rtplan_file, region_file,
+                                      output_dir="freds",
+                                      nprim=args.nprim,
+                                      ct_file=args.ct_file)
 
-            fred_files.append(fred_file)
-            region_files.append(region_file)
-            a+=1
+        print(f"\nSuccessfully generated rtplan file in: rtplans/{rtplan_file}")
+        print(f"Successfully generated fred file in:   freds/{fred_file}")
+        print(f"Successfully generated region file in: regions/{region_file}")
 
-        print(f"\nSuccessfully generated {len(rtplan_files)} rtplan file(s) in: rtplans/")
-        for f in rtplan_files:
-            print(f"  - {f}")
-
-        print(f"\nSuccessfully generated {len(fred_files)} fred file(s) in: freds/")
-        for f in fred_files:
-            print(f"  - {f}")
-        print(f"\nSuccessfully generated {len(region_files)} region file(s) in: regions/")
-        for f in region_files:
-            print(f"  - {f}")
+        print(f"\nSuccessfully generated {len(rtplan_file)} rtplan file in: rtplans/")
+        print(f"\nSuccessfully generated {len(fred_file)} fred file in: freds/")
+        print(f"\nSuccessfully generated {len(region_file)} region file in: regions/")
 
     except Exception as e:
         print(f"Error generating .inp file: {e}")
