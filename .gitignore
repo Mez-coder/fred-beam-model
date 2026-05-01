@@ -1,6 +1,9 @@
 ﻿ct.raw
 ct.mhd
-output/
-dcm_data/
+CT_altered.mhd
+CT_altered.raw
+out/
+example_dcm/
 .env
 .venv
+.idea

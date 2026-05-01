@@ -265,7 +265,7 @@ def generate_field_definitions(fields_info):
     for _, field in fields_info.iterrows():
         field_id = int(field['FDeliveryNo'])
         field_name = field['FName']
-        
+
         # Field origin - at SMY magnet position (256 cm from iso)
         # O is defined in the FRED coordinate system
         O = [0.0, -FIELD_ORIGIN_DISTANCE_CM, 0.0]
@@ -600,7 +600,7 @@ def generate_inp_file(rn_file, bm_file, output_dir="rtplans"):
         all_lines.extend(lines)
         all_lines.extend(pb_lines)
 
-        output_file = f"rtplan_{field_name}.inp"
+        output_file = f"rtplan_{field_name.replace(" ", "")}.inp"
         full_path = output_path / output_file
 
         print(f"Writing to: {full_path}")
@@ -756,6 +756,7 @@ def main():
 
     parser.add_argument('dcm_file', help='Path to DICOM folder')
     parser.add_argument('bm_file', help='Path to beam model (.bm) file')
+    parser.add_argument('ct_file', help='Path to CT (.mhd) file')
 
     args = parser.parse_args()
     dcm_folder = args.dcm_file
@@ -771,6 +772,10 @@ def main():
         print(f"Error: Beam model file not found: {args.bm_file}")
         sys.exit(1)
 
+    if not Path(args.ct_file):
+        print(f"Error: CT file not found: {args.ct_file}")
+        sys.exit(1)
+
     try:
         clear_directories("rtplans", "freds", "regions")
         # Generate one rtplan .inp per field
@@ -784,7 +789,7 @@ def main():
             rs_length = extract_rs_value(rs_ids[a])
 
             region_file = generate_region_inp(rtplan_file, output_dir="regions", rs_length=rs_length)
-            fred_file = generate_fred_inp(rtplan_file, region_file, output_dir="freds", nprim=5e4)
+            fred_file = generate_fred_inp(rtplan_file, region_file, output_dir="freds", nprim=5e4, ct_file=args.ct_file)
             
 
             fred_files.append(fred_file)
